@@ -254,7 +254,7 @@ def style_results(df: pd.DataFrame) -> pd.io.formats.style.Styler:
 
     return (
         df.style
-        .applymap(upside_color, subset=["Upside (%)"])
+        .map(upside_color, subset=["Upside (%)"])
         .format({
             "Price":             "{:.2f}",
             "Intrinsic Value":   "{:.2f}",
