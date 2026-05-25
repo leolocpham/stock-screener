@@ -2,15 +2,12 @@
 # app.py – Stock Screening Web Application
 # Run with:  streamlit run app.py
 # =============================================================================
-#
-# Dependencies (install via):
-#   pip install -r requirements.txt
-#
-# =============================================================================
 
 from __future__ import annotations
 import io
+import json
 import logging
+import os
 from typing import List, Optional
 
 import numpy as np
@@ -29,6 +26,85 @@ logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Presets
+# ---------------------------------------------------------------------------
+
+PRESETS_FILE = "presets.json"
+
+BUILTIN_PRESETS = {
+    "Conservative Value": {
+        "pe_enabled": True,  "pe_max": 15.0,
+        "pb_enabled": True,  "pb_max": 1.5,
+        "ev_ebitda_enabled": True, "ev_ebitda_max": 12.0,
+        "ps_enabled": True,  "ps_max": 2.0,
+        "de_enabled": True,  "de_max": 0.5,
+        "current_enabled": True, "current_min": 1.5,
+        "roe_enabled": True, "roe_min": 12.0,
+        "dcf_enabled": True, "dcf_growth_rate": 6.0,
+        "dcf_discount_rate": 10.0, "dcf_terminal_growth": 2.5,
+        "dcf_years": 10,     "dcf_margin_safety": 30.0, "dcf_mos_filter": True,
+        "graham_enabled": True, "graham_growth": 7.0, "graham_no_growth_pe": 8.5,
+    },
+    "GARP": {
+        "pe_enabled": True,  "pe_max": 25.0,
+        "pb_enabled": True,  "pb_max": 3.0,
+        "ev_ebitda_enabled": True, "ev_ebitda_max": 18.0,
+        "ps_enabled": True,  "ps_max": 3.0,
+        "de_enabled": True,  "de_max": 1.0,
+        "current_enabled": True, "current_min": 1.2,
+        "roe_enabled": True, "roe_min": 15.0,
+        "dcf_enabled": True, "dcf_growth_rate": 12.0,
+        "dcf_discount_rate": 9.0, "dcf_terminal_growth": 3.0,
+        "dcf_years": 10,     "dcf_margin_safety": 20.0, "dcf_mos_filter": False,
+        "graham_enabled": False, "graham_growth": 10.0, "graham_no_growth_pe": 8.5,
+    },
+    "Deep Value": {
+        "pe_enabled": True,  "pe_max": 10.0,
+        "pb_enabled": True,  "pb_max": 1.0,
+        "ev_ebitda_enabled": True, "ev_ebitda_max": 8.0,
+        "ps_enabled": True,  "ps_max": 1.0,
+        "de_enabled": True,  "de_max": 0.3,
+        "current_enabled": True, "current_min": 2.0,
+        "roe_enabled": True, "roe_min": 10.0,
+        "dcf_enabled": True, "dcf_growth_rate": 4.0,
+        "dcf_discount_rate": 10.0, "dcf_terminal_growth": 2.0,
+        "dcf_years": 10,     "dcf_margin_safety": 40.0, "dcf_mos_filter": True,
+        "graham_enabled": True, "graham_growth": 5.0, "graham_no_growth_pe": 8.5,
+    },
+}
+
+# Keys that are saved/restored by presets (widget keys only — not exchange/ticker config)
+PRESET_KEYS = [
+    "pe_enabled", "pe_max", "pb_enabled", "pb_max",
+    "ev_ebitda_enabled", "ev_ebitda_max", "ps_enabled", "ps_max",
+    "de_enabled", "de_max", "current_enabled", "current_min",
+    "roe_enabled", "roe_min",
+    "dcf_enabled", "dcf_growth_rate", "dcf_discount_rate",
+    "dcf_terminal_growth", "dcf_years", "dcf_margin_safety", "dcf_mos_filter",
+    "graham_enabled", "graham_growth", "graham_no_growth_pe",
+]
+
+
+def _load_presets_file() -> dict:
+    if os.path.exists(PRESETS_FILE):
+        try:
+            with open(PRESETS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_presets_file(presets: dict) -> None:
+    with open(PRESETS_FILE, "w") as f:
+        json.dump(presets, f, indent=2)
+
+
+def _get_all_presets() -> dict:
+    return {**BUILTIN_PRESETS, **_load_presets_file()}
+
+
+# ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
 st.set_page_config(
@@ -39,7 +115,7 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
-# Minimal custom CSS (colour palette only)
+# Minimal custom CSS
 # ---------------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -56,12 +132,80 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
+# Preset panel (rendered at top of sidebar)
+# ---------------------------------------------------------------------------
+
+def _render_preset_panel() -> None:
+    all_presets = _get_all_presets()
+    user_presets = _load_presets_file()
+    preset_names = list(all_presets.keys())
+
+    st.sidebar.header("💾 Presets")
+
+    # ── Load ─────────────────────────────────────────────────────────────────
+    col_sel, col_load = st.sidebar.columns([3, 1])
+    selected = col_sel.selectbox(
+        "Load preset",
+        ["— select —"] + preset_names,
+        key="_preset_select",
+        label_visibility="collapsed",
+    )
+    if col_load.button("Load", key="_preset_load", use_container_width=True):
+        if selected != "— select —":
+            for k, v in all_presets[selected].items():
+                st.session_state[k] = v
+            st.toast(f"Loaded: {selected}", icon="✅")
+            st.rerun()
+
+    # ── Save ──────────────────────────────────────────────────────────────────
+    col_name, col_save = st.sidebar.columns([3, 1])
+    new_name = col_name.text_input(
+        "Preset name",
+        placeholder="My preset name",
+        key="_preset_name",
+        label_visibility="collapsed",
+    )
+    if col_save.button("Save", key="_preset_save", use_container_width=True):
+        name = (new_name or "").strip()
+        if not name:
+            st.sidebar.warning("Enter a name first.")
+        elif name in BUILTIN_PRESETS:
+            st.sidebar.error("Can't overwrite built-in presets.")
+        else:
+            vals = {k: st.session_state[k] for k in PRESET_KEYS if k in st.session_state}
+            user_presets[name] = vals
+            _save_presets_file(user_presets)
+            st.toast(f'Saved preset "{name}"', icon="💾")
+            st.rerun()
+
+    # ── Delete ────────────────────────────────────────────────────────────────
+    if user_presets:
+        col_del, col_del_btn = st.sidebar.columns([3, 1])
+        del_name = col_del.selectbox(
+            "Delete preset",
+            ["— select —"] + list(user_presets.keys()),
+            key="_preset_del_select",
+            label_visibility="collapsed",
+        )
+        if col_del_btn.button("Del", key="_preset_del", use_container_width=True):
+            if del_name != "— select —":
+                user_presets.pop(del_name, None)
+                _save_presets_file(user_presets)
+                st.toast(f'Deleted "{del_name}"', icon="🗑️")
+                st.rerun()
+
+    st.sidebar.divider()
+
+
+# ---------------------------------------------------------------------------
 # Sidebar – configuration panel
 # ---------------------------------------------------------------------------
 
 def render_sidebar() -> dict:
     """Render all sidebar controls and return the full params dict."""
     st.sidebar.title("⚙️ Screener Config")
+
+    _render_preset_panel()
 
     # ── Exchange & Ticker Selection ──────────────────────────────────────────
     st.sidebar.header("🌎 Universe")
@@ -128,68 +272,77 @@ def render_sidebar() -> dict:
     # ── Valuation Ratio Filters ──────────────────────────────────────────────
     st.sidebar.header("📊 Valuation Ratios")
 
-    pe_enabled = st.sidebar.toggle("Filter by P/E Ratio", value=True)
+    pe_enabled = st.sidebar.toggle("Filter by P/E Ratio", value=True, key="pe_enabled")
     pe_max = st.sidebar.slider("Max P/E", 0.0, 150.0, DEFAULTS["pe_max"], 0.5,
-                                disabled=not pe_enabled)
+                                disabled=not pe_enabled, key="pe_max")
 
-    pb_enabled = st.sidebar.toggle("Filter by P/B Ratio", value=True)
+    pb_enabled = st.sidebar.toggle("Filter by P/B Ratio", value=True, key="pb_enabled")
     pb_max = st.sidebar.slider("Max P/B", 0.0, 20.0, DEFAULTS["pb_max"], 0.1,
-                                disabled=not pb_enabled)
+                                disabled=not pb_enabled, key="pb_max")
 
-    ev_enabled = st.sidebar.toggle("Filter by EV/EBITDA", value=True)
+    ev_enabled = st.sidebar.toggle("Filter by EV/EBITDA", value=True, key="ev_ebitda_enabled")
     ev_max = st.sidebar.slider("Max EV/EBITDA", 0.0, 60.0, DEFAULTS["ev_ebitda_max"], 0.5,
-                                disabled=not ev_enabled)
+                                disabled=not ev_enabled, key="ev_ebitda_max")
 
-    ps_enabled = st.sidebar.toggle("Filter by P/S Ratio", value=True)
+    ps_enabled = st.sidebar.toggle("Filter by P/S Ratio", value=True, key="ps_enabled")
     ps_max = st.sidebar.slider("Max P/S", 0.0, 30.0, DEFAULTS["ps_max"], 0.1,
-                                disabled=not ps_enabled)
+                                disabled=not ps_enabled, key="ps_max")
 
     # ── Intrinsic Value Models ───────────────────────────────────────────────
     st.sidebar.header("🧮 Intrinsic Value Models")
 
-    dcf_enabled = st.sidebar.toggle("DCF Model", value=DEFAULTS["dcf_enabled"])
+    dcf_enabled = st.sidebar.toggle("DCF Model", value=DEFAULTS["dcf_enabled"], key="dcf_enabled")
     if dcf_enabled:
-        dcf_growth  = st.sidebar.slider("Expected Growth Rate (%)",
-                                         0.0, 40.0, DEFAULTS["dcf_growth_rate"], 0.5)
+        dcf_growth   = st.sidebar.slider("Expected Growth Rate (%)",
+                                          0.0, 40.0, DEFAULTS["dcf_growth_rate"], 0.5,
+                                          key="dcf_growth_rate")
         dcf_discount = st.sidebar.slider("Discount Rate / WACC (%)",
-                                          4.0, 25.0, DEFAULTS["dcf_discount_rate"], 0.5)
+                                          4.0, 25.0, DEFAULTS["dcf_discount_rate"], 0.5,
+                                          key="dcf_discount_rate")
         dcf_terminal = st.sidebar.slider("Terminal Growth Rate (%)",
-                                          0.0, 6.0, DEFAULTS["dcf_terminal_growth"], 0.5)
+                                          0.0, 6.0, DEFAULTS["dcf_terminal_growth"], 0.5,
+                                          key="dcf_terminal_growth")
         dcf_years    = st.sidebar.select_slider("Projection Years",
                                                  options=DCF_YEAR_OPTIONS,
-                                                 value=DEFAULTS["dcf_years"])
+                                                 value=DEFAULTS["dcf_years"],
+                                                 key="dcf_years")
         dcf_mos      = st.sidebar.slider("Margin of Safety (%)",
                                           0.0, 60.0, DEFAULTS["dcf_margin_safety"], 5.0,
-                                          help="Show only stocks trading ≥ this % below DCF value.")
-        dcf_mos_filter = st.sidebar.toggle("Enforce MoS as hard filter", value=False)
+                                          help="Show only stocks trading ≥ this % below DCF value.",
+                                          key="dcf_margin_safety")
+        dcf_mos_filter = st.sidebar.toggle("Enforce MoS as hard filter", value=False,
+                                            key="dcf_mos_filter")
     else:
         dcf_growth = dcf_discount = dcf_terminal = dcf_mos = 0.0
         dcf_years = 10
         dcf_mos_filter = False
 
-    graham_enabled = st.sidebar.toggle("Graham Formula", value=DEFAULTS["graham_enabled"])
+    graham_enabled = st.sidebar.toggle("Graham Formula", value=DEFAULTS["graham_enabled"],
+                                        key="graham_enabled")
     if graham_enabled:
-        graham_growth   = st.sidebar.slider("Graham Expected Growth (%)",
-                                             0.0, 25.0, DEFAULTS["graham_growth"], 0.5)
-        graham_no_gpe   = st.sidebar.slider("No-Growth Base P/E",
-                                             5.0, 15.0, DEFAULTS["graham_no_growth_pe"], 0.5)
+        graham_growth = st.sidebar.slider("Graham Expected Growth (%)",
+                                           0.0, 25.0, DEFAULTS["graham_growth"], 0.5,
+                                           key="graham_growth")
+        graham_no_gpe = st.sidebar.slider("No-Growth Base P/E",
+                                           5.0, 15.0, DEFAULTS["graham_no_growth_pe"], 0.5,
+                                           key="graham_no_growth_pe")
     else:
         graham_growth = graham_no_gpe = 0.0
 
     # ── Financial Health Filters ─────────────────────────────────────────────
     st.sidebar.header("🛡️ Financial Health")
 
-    de_enabled = st.sidebar.toggle("Filter by Debt/Equity", value=True)
+    de_enabled = st.sidebar.toggle("Filter by Debt/Equity", value=True, key="de_enabled")
     de_max = st.sidebar.slider("Max Debt/Equity", 0.0, 10.0, DEFAULTS["de_max"], 0.1,
-                                disabled=not de_enabled)
+                                disabled=not de_enabled, key="de_max")
 
-    cr_enabled = st.sidebar.toggle("Filter by Current Ratio", value=True)
+    cr_enabled = st.sidebar.toggle("Filter by Current Ratio", value=True, key="current_enabled")
     cr_min = st.sidebar.slider("Min Current Ratio", 0.0, 5.0, DEFAULTS["current_min"], 0.1,
-                                disabled=not cr_enabled)
+                                disabled=not cr_enabled, key="current_min")
 
-    roe_enabled = st.sidebar.toggle("Filter by ROE", value=True)
+    roe_enabled = st.sidebar.toggle("Filter by ROE", value=True, key="roe_enabled")
     roe_min = st.sidebar.slider("Min ROE (%)", 0.0, 50.0, DEFAULTS["roe_min"], 1.0,
-                                 disabled=not roe_enabled)
+                                 disabled=not roe_enabled, key="roe_min")
 
     return {
         # Universe
@@ -237,7 +390,6 @@ def render_sidebar() -> dict:
 # ---------------------------------------------------------------------------
 
 def style_results(df: pd.DataFrame) -> pd.io.formats.style.Styler:
-    """Apply conditional formatting to the results DataFrame."""
     def upside_color(val):
         if not isinstance(val, (int, float)) or np.isnan(val):
             return ""
@@ -279,7 +431,6 @@ def style_results(df: pd.DataFrame) -> pd.io.formats.style.Styler:
 
 def render_stock_chart(ticker: str, intrinsic_value: Optional[float],
                         currency: str = "USD") -> None:
-    """Render a 12-month price chart with horizontal intrinsic-value line."""
     with st.spinner(f"Loading chart for {ticker}…"):
         hist = fetch_price_history(ticker, period="1y")
 
@@ -289,7 +440,6 @@ def render_stock_chart(ticker: str, intrinsic_value: Optional[float],
 
     fig = go.Figure()
 
-    # Candlestick (or close line for cleaner look on small data)
     fig.add_trace(go.Scatter(
         x=hist.index, y=hist["Close"],
         mode="lines", name="Close Price",
@@ -297,7 +447,6 @@ def render_stock_chart(ticker: str, intrinsic_value: Optional[float],
         fill="tozeroy", fillcolor="rgba(79,195,247,0.08)",
     ))
 
-    # Intrinsic value line
     if intrinsic_value and intrinsic_value > 0:
         fig.add_hline(
             y=intrinsic_value,
@@ -307,7 +456,6 @@ def render_stock_chart(ticker: str, intrinsic_value: Optional[float],
             annotation_font=dict(color="#00e676"),
         )
 
-    # 52-week high/low bands
     fig.add_hline(y=hist["Close"].max(),
                   line=dict(color="#ffca28", width=1, dash="dot"),
                   annotation_text="52W High", annotation_position="top right",
@@ -335,14 +483,12 @@ def render_stock_chart(ticker: str, intrinsic_value: Optional[float],
 # ---------------------------------------------------------------------------
 
 def main():
-    # Header
     st.title("📈 Global Stock Screener")
     st.caption(
         "Screens NYSE, NASDAQ, LSE, TSX, ASX, Tokyo & EuroNext for undervalued stocks "
         "using DCF, Benjamin Graham, and ratio-based filters. Data via yfinance."
     )
 
-    # Render sidebar and collect parameters
     params = render_sidebar()
 
     # ── Ticker resolution ────────────────────────────────────────────────────
@@ -373,7 +519,6 @@ def main():
 
     # ── Fetch & screen ────────────────────────────────────────────────────────
     if run_clicked:
-        # Fetch financial data with progress bar
         progress_bar = st.progress(0, text="Initialising…")
         status_text  = st.empty()
 
@@ -398,10 +543,8 @@ def main():
 
         st.session_state["raw_df"] = raw_df
 
-        # Fetch treasury yield for Graham formula
         bond_yield = fetch_treasury_yield()
 
-        # Run screening engine
         with st.spinner("Applying filters…"):
             results_df = run_screen(
                 raw_df,
@@ -422,20 +565,18 @@ def main():
         st.info("Configure your filters in the sidebar and click **Run Screener** to begin.")
         return
 
-    # Summary KPI cards
     bond_yield = st.session_state.get("bond_yield", 4.4)
     total_scanned = len(raw_df) if raw_df is not None else 0
     total_passed  = len(results_df)
     avg_upside    = results_df["Upside (%)"].mean() if total_passed else 0
     top_ticker    = results_df["Ticker"].iloc[0] if total_passed else "—"
-    top_upside    = results_df["Upside (%)"].iloc[0] if total_passed else 0
 
     k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Scanned",      total_scanned)
+    k1.metric("Scanned",        total_scanned)
     k2.metric("Passed Filters", total_passed)
-    k3.metric("Avg Upside",   f"{avg_upside:.1f}%")
-    k4.metric("Top Pick",     top_ticker)
-    k5.metric("10Y Treasury", f"{bond_yield:.2f}%")
+    k3.metric("Avg Upside",     f"{avg_upside:.1f}%")
+    k4.metric("Top Pick",       top_ticker)
+    k5.metric("10Y Treasury",   f"{bond_yield:.2f}%")
 
     st.divider()
 
@@ -446,7 +587,6 @@ def main():
     # ── Interactive results table ─────────────────────────────────────────────
     st.subheader(f"📋 Screened Results ({total_passed} stocks)")
 
-    # Column display order (hide some columns by default for cleaner view)
     display_cols = [
         "Ticker", "Company", "Exchange", "Currency", "Price",
         "Intrinsic Value", "Upside (%)", "P/E", "P/B", "EV/EBITDA",
@@ -454,7 +594,6 @@ def main():
     ]
     display_df = results_df[[c for c in display_cols if c in results_df.columns]]
 
-    # Streamlit 1.35+ supports row selection via on_select
     try:
         event = st.dataframe(
             style_results(display_df),
@@ -466,7 +605,6 @@ def main():
         )
         selected_rows = event.selection.rows if hasattr(event, "selection") else []
     except TypeError:
-        # Fallback for older Streamlit versions
         st.dataframe(style_results(display_df), use_container_width=True, height=460)
         selected_rows = []
 
@@ -480,13 +618,11 @@ def main():
         mime="text/csv",
     )
 
-    # ── Stock detail panel ─────────────────────────────────────────────────────
-    # Selection from table (Streamlit 1.35+) or manual picker
+    # ── Stock detail panel ────────────────────────────────────────────────────
     selected_ticker = None
     if selected_rows:
         selected_ticker = display_df.iloc[selected_rows[0]]["Ticker"]
     else:
-        # Fallback: manual selectbox below the table
         ticker_options = ["(none)"] + display_df["Ticker"].tolist()
         chosen = st.selectbox("🔎 Inspect a stock", ticker_options,
                                index=0, key="manual_select")
@@ -498,10 +634,10 @@ def main():
 
         with st.expander(f"📊 Detail: {selected_ticker} — {sel_row['Company']}", expanded=True):
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Current Price",    f"{sel_row['Price']:.2f} {sel_row['Currency']}")
-            c2.metric("Intrinsic Value",  f"{sel_row['Intrinsic Value']:.2f} {sel_row['Currency']}")
+            c1.metric("Current Price",   f"{sel_row['Price']:.2f} {sel_row['Currency']}")
+            c2.metric("Intrinsic Value", f"{sel_row['Intrinsic Value']:.2f} {sel_row['Currency']}")
             c3.metric("Upside Potential", f"{sel_row['Upside (%)']:.1f}%")
-            c4.metric("Model Used",       sel_row["Model"])
+            c4.metric("Model Used",      sel_row["Model"])
 
             col_a, col_b = st.columns(2)
             with col_a:
@@ -519,7 +655,6 @@ def main():
                     f"ROE: `{sel_row['ROE (%)']}`"
                 )
 
-            # 12-month price chart
             render_stock_chart(
                 selected_ticker,
                 sel_row["Intrinsic Value"],
